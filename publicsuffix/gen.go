@@ -557,6 +557,16 @@ func (am affixMap) addAffix(affix string, num int) {
 	}
 }
 
+// keys returns the keys of affixMap in sorted order.
+func (am affixMap) keys() []string {
+	ks := make([]string, 0, len(am))
+	for k := range am {
+		ks = append(ks, k)
+	}
+	sort.Strings(ks)
+	return ks
+}
+
 // makeAffixMaps constructs a prefix map and a suffix map from a slice of
 // strings, containing all prefixes and suffixes of length affixLen.
 func makeAffixMaps(ss []string, affixLen int) (suffixes, prefixes affixMap) {
@@ -567,11 +577,8 @@ func makeAffixMaps(ss []string, affixLen int) (suffixes, prefixes affixMap) {
 		if affixLen >= len(s) {
 			continue
 		}
-		// Take the length-N suffix and prefix of string i and add them to
-		// the corresponding affixMaps.
 		suffix := s[len(s)-affixLen:]
 		prefix := s[0:affixLen]
-		fmt.Fprintf(os.Stderr, "addString %d %s %s %s\n", affixLen, s, prefix, suffix)
 		suffixes.addAffix(suffix, i)
 		prefixes.addAffix(prefix, i)
 	}
@@ -584,12 +591,11 @@ func makeAffixMaps(ss []string, affixLen int) (suffixes, prefixes affixMap) {
 // Note: This is not guaranteed to find all such pairs, or the optimal ordering
 // to combine them. Calling crush more than once for a given affixLen is likely
 // to yield additional improvements.
-// TODO: Make output deterministic by sorting map keys before interating on
-// them. Maybe. That could be a big performance hit.
 func crush(ss []string, affixLen int) []string {
 	suffixes, prefixes := makeAffixMaps(ss, affixLen)
 
-	for suffix, sufindexes := range suffixes {
+	for _, suffix := range suffixes.keys() {
+		sufindexes := suffixes[suffix]
 		for _, sufindex := range sufindexes {
 			if ss[sufindex] == "" {
 				continue
@@ -599,15 +605,56 @@ func crush(ss []string, affixLen int) []string {
 					if prefindex == sufindex || ss[prefindex] == "" || ss[sufindex] == "" {
 						continue
 					}
-					fmt.Fprintf(os.Stderr, "looking at %d %s  %d %s  %s\n", sufindex, ss[sufindex], prefindex, ss[prefindex], suffix)
 					newString := ss[sufindex] + ss[prefindex][affixLen:]
-					fmt.Fprintf(os.Stderr, "%d-length: %s + %s -> %s\n", affixLen, ss[sufindex], ss[prefindex], newString)
+					if *v {
+						fmt.Fprintf(os.Stderr, "%d-length overlap at (%4d,%4d): %q and %q share %q\n",
+							affixLen, sufindex, prefindex, ss[sufindex], ss[prefindex], suffix)
+					}
 					ss[sufindex] = ""
 					ss[prefindex] = ""
 					ss = append(ss, newString)
 				}
 			}
 		}
+	}
+	return ss
+}
+
+type ByLength []string
+
+func (s ByLength) Len() int {
+	return len(s)
+}
+func (s ByLength) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
+}
+func (s ByLength) Less(i, j int) bool {
+	return len(s[i]) < len(s[j])
+}
+
+// removeSubstrings returns a subset of its input with any strings removed
+// that are substrings of other strings in the output.
+func removeSubstrings(input []string) []string {
+	begin := time.Now()
+	removedCount := 0
+
+	// Make a copy of input.
+	ss := append(make([]string, 0, len(input)), input...)
+	sort.Sort(ByLength(ss))
+
+	for i, shortString := range ss {
+		// For each string, only consider strings higher than it in sort order, i.e.
+		// of equal length or greater.
+		for _, longString := range ss[i+1:] {
+			if strings.Contains(longString, shortString) {
+				removedCount++
+				ss[i] = ""
+				break
+			}
+		}
+	}
+	if *v {
+		fmt.Fprintf(os.Stderr, "removed %d substrings in %s\n", removedCount, time.Now().Sub(begin))
 	}
 	return ss
 }
@@ -621,31 +668,11 @@ func combineText(labelsList []string) string {
 		beforeLength += len(s)
 	}
 
-	// Make a copy of labelsList.
-	ss := append(make([]string, 0, len(labelsList)), labelsList...)
+	ss := removeSubstrings(labelsList)
 
-	begin := time.Now()
-	removedCount := 0
-	// Remove strings that are substrings of other strings.
-	for changed := true; changed; {
-		changed = false
-		for i, s := range ss {
-			if s == "" {
-				continue
-			}
-			for j, t := range ss {
-				if i != j && t != "" && strings.Contains(s, t) {
-					fmt.Fprintf(os.Stderr, "removing %s from %s\n", t, s)
-					changed = true
-					removedCount++
-					ss[j] = ""
-				}
-			}
-		}
-	}
-	fmt.Fprintf(os.Stderr, "removed %d substrings in %s\n", removedCount, time.Now().Sub(begin))
-
-	for j := 15; j > 0; j-- {
+	// Length of the maximum overlap in (suffix, prefix) we expect.
+	const maxCommonAffix = 15
+	for j := maxCommonAffix; j > 0; j-- {
 		ss = crush(ss, j)
 		ss = crush(ss, j)
 		ss = crush(ss, j)
