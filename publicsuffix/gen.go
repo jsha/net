@@ -582,56 +582,75 @@ func makeText() string {
 		ss = ss[1:]
 	}
 
-	shortestWortwhile := 1
-	// For length L, suffixes[L] contains a map of all length-L suffixes to an
-	// index of a string containing that suffix.
-	suffixes := make([]map[string]int, 200)
-	for i, s := range ss {
-		for j := len(s) - 1; j > shortestWortwhile; j-- {
-			suffix := s[len(s)-j:]
-			if suffixes[j] == nil {
-				suffixes[j] = make(map[string]int)
-			}
-			fmt.Fprintf(os.Stderr, "suf %d %s %s = %d\n", j, s, suffix, i)
-			suffixes[j][suffix] = i
+	addAffix := func(mp map[string][]int, affix string, num int) {
+		if mp[affix] == nil {
+			mp[affix] = []int{num}
+		} else {
+			mp[affix] = append(mp[affix], num)
 		}
 	}
 
-	prefixes := make([]map[string]int, 200)
-	for i, s := range ss {
-		for j := len(s) - 1; j > shortestWortwhile; j-- {
-			prefix := s[0:j]
-			if prefixes[j] == nil {
-				prefixes[j] = make(map[string]int)
+	crush := func(affixLen int) {
+		// For length L, suffixes[L] contains a map of all length-L suffixes to an
+		// index of a string containing that suffix.
+		suffixes := make(map[string][]int, len(ss))
+		prefixes := make(map[string][]int, len(ss))
+		enroll := func(s string, i int) {
+			if affixLen >= len(s) {
+				return
 			}
-			fmt.Fprintf(os.Stderr, "pref %d %s %s = %d\n", j, s, prefix, i)
-			prefixes[j][prefix] = i
+			suffix := s[len(s)-affixLen:]
+			prefix := s[0:affixLen]
+			fmt.Fprintf(os.Stderr, "enroll %d %s %s %s\n", affixLen, s, prefix, suffix)
+			addAffix(suffixes, suffix, i)
+			addAffix(prefixes, prefix, i)
 		}
-	}
 
-	// Join strings where one suffix matches another prefix, going from longest
-	// match to shortest. Burnt is a list of string indexes that are no longer
-	// usable because they have been joined.
-	burnt := make(map[int]bool)
-	for i := 15; i > shortestWortwhile; i-- {
-		suffs := suffixes[i]
-		prefs := prefixes[i]
-		for suffix, sufindex := range suffs {
-			if burnt[sufindex] {
-				continue
-			}
-			if prefindex, ok := prefs[suffix]; ok {
-				if burnt[prefindex] || prefindex == sufindex {
-					continue
+		for i, s := range ss {
+			enroll(s, i)
+		}
+
+		// Join strings where one suffix matches another prefix, going from longest
+		// match to shortest. Burnt is a list of string indexes that are no longer
+		// usable because they have been joined.
+		burnt := make(map[int]bool)
+		suffs := suffixes
+		prefs := prefixes
+		fmt.Fprintf(os.Stderr, "continue\n")
+		// Returns true if joined anything; false otherwise.
+		joinOne := func() bool {
+			for suffix, sufindexes := range suffs {
+				for _, sufindex := range sufindexes {
+					if burnt[sufindex] || ss[sufindex] == "" {
+						continue
+					}
+					if prefindexes, ok := prefs[suffix]; ok {
+						for _, prefindex := range prefindexes {
+							if burnt[prefindex] || prefindex == sufindex || ss[prefindex] == "" {
+								continue
+							}
+							fmt.Fprintf(os.Stderr, "looking at %d %s  %d %s  %s\n", sufindex, ss[sufindex], prefindex, ss[prefindex], suffix)
+							newString := ss[sufindex] + ss[prefindex][affixLen:]
+							fmt.Fprintf(os.Stderr, "%d-length: %s + %s -> %s\n", affixLen, ss[sufindex], ss[prefindex], newString)
+							ss[sufindex] = newString
+							ss[prefindex] = ""
+							burnt[sufindex] = true
+							burnt[prefindex] = true
+							return true
+						}
+					}
 				}
-				newString := ss[sufindex] + ss[prefindex][i:]
-				fmt.Fprintf(os.Stderr, "%d-length: %s = %s -> %s\n", i, ss[sufindex], ss[prefindex], newString)
-				ss[sufindex] = newString
-				ss[prefindex] = ""
-				burnt[sufindex] = true
-				burnt[prefindex] = true
 			}
+			return false
 		}
+		for joinOne() {
+		}
+	}
+	for j := 15; j > 0; j-- {
+		crush(j)
+		crush(j)
+		crush(j)
+		crush(j)
 	}
 
 	text := strings.Join(ss, "")
