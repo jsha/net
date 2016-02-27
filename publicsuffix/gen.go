@@ -40,6 +40,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/net/idna"
 )
@@ -110,7 +111,6 @@ var (
 	// letters are not allowed.
 	validSuffix = regexp.MustCompile(`^[a-z0-9_\!\*\-\.]+$`)
 
-	crush  = flag.Bool("crush", true, "make the generated node text as small as possible")
 	subset = flag.Bool("subset", false, "generate only a subset of the full table, for debugging")
 	url    = flag.String("url",
 		"https://publicsuffix.org/list/effective_tld_names.dat",
@@ -301,7 +301,7 @@ const numTLD = %d
 		childrenBitsWildcard, childrenBitsNodeType, childrenBitsHi, childrenBitsLo,
 		nodeTypeNormal, nodeTypeException, nodeTypeParentOnly, len(n.children))
 
-	text := makeText()
+	text := combineText(labelsList)
 	if text == "" {
 		return fmt.Errorf("internal error: makeText returned no text")
 	}
@@ -544,14 +544,78 @@ func wildcardStr(wildcard bool) string {
 	return " "
 }
 
-// makeText combines all the strings in labelsList to form one giant string.
-// If the crush flag is true, then overlapping strings will be merged: "arpa"
-// and "parliament" could yield "arparliament".
-func makeText() string {
-	if !*crush {
-		return strings.Join(labelsList, "")
+// affixMap maps from an affix (prefix or suffix) to a list of strings
+// containing that affix. The list of strings is represented as indexes into a
+// slice of strings stored elsewhere.
+type affixMap map[string][]int
+
+func (am affixMap) addAffix(affix string, num int) {
+	if am[affix] == nil {
+		am[affix] = []int{num}
+	} else {
+		am[affix] = append(am[affix], num)
+	}
+}
+
+// makeAffixMaps constructs a prefix map and a suffix map from a slice of
+// strings, containing all prefixes and suffixes of length affixLen.
+func makeAffixMaps(ss []string, affixLen int) (suffixes, prefixes affixMap) {
+	suffixes = make(map[string][]int, len(ss))
+	prefixes = make(map[string][]int, len(ss))
+
+	for i, s := range ss {
+		if affixLen >= len(s) {
+			continue
+		}
+		// Take the length-N suffix and prefix of string i and add them to
+		// the corresponding affixMaps.
+		suffix := s[len(s)-affixLen:]
+		prefix := s[0:affixLen]
+		fmt.Fprintf(os.Stderr, "addString %d %s %s %s\n", affixLen, s, prefix, suffix)
+		suffixes.addAffix(suffix, i)
+		prefixes.addAffix(prefix, i)
 	}
 
+	return suffixes, prefixes
+}
+
+// crush finds matching (suffix, prefix) pairs of length `affixLen`, remove the
+// strings that contain them, and insert a hybrid string.
+// Note: This is not guaranteed to find all such pairs, or the optimal ordering
+// to combine them. Calling crush more than once for a given affixLen is likely
+// to yield additional improvements.
+// TODO: Make output deterministic by sorting map keys before interating on
+// them. Maybe. That could be a big performance hit.
+func crush(ss []string, affixLen int) []string {
+	suffixes, prefixes := makeAffixMaps(ss, affixLen)
+
+	for suffix, sufindexes := range suffixes {
+		for _, sufindex := range sufindexes {
+			if ss[sufindex] == "" {
+				continue
+			}
+			if prefindexes, ok := prefixes[suffix]; ok {
+				for _, prefindex := range prefindexes {
+					if prefindex == sufindex || ss[prefindex] == "" || ss[sufindex] == "" {
+						continue
+					}
+					fmt.Fprintf(os.Stderr, "looking at %d %s  %d %s  %s\n", sufindex, ss[sufindex], prefindex, ss[prefindex], suffix)
+					newString := ss[sufindex] + ss[prefindex][affixLen:]
+					fmt.Fprintf(os.Stderr, "%d-length: %s + %s -> %s\n", affixLen, ss[sufindex], ss[prefindex], newString)
+					ss[sufindex] = ""
+					ss[prefindex] = ""
+					ss = append(ss, newString)
+				}
+			}
+		}
+	}
+	return ss
+}
+
+// combineText combines all the strings in labelsList to form one giant string.
+// Overlapping strings will be merged: "arpa" and "parliament" could yield
+// "arparliament".
+func combineText(labelsList []string) string {
 	beforeLength := 0
 	for _, s := range labelsList {
 		beforeLength += len(s)
@@ -560,6 +624,8 @@ func makeText() string {
 	// Make a copy of labelsList.
 	ss := append(make([]string, 0, len(labelsList)), labelsList...)
 
+	begin := time.Now()
+	removedCount := 0
 	// Remove strings that are substrings of other strings.
 	for changed := true; changed; {
 		changed = false
@@ -569,96 +635,21 @@ func makeText() string {
 			}
 			for j, t := range ss {
 				if i != j && t != "" && strings.Contains(s, t) {
+					fmt.Fprintf(os.Stderr, "removing %s from %s\n", t, s)
 					changed = true
+					removedCount++
 					ss[j] = ""
 				}
 			}
 		}
 	}
+	fmt.Fprintf(os.Stderr, "removed %d substrings in %s\n", removedCount, time.Now().Sub(begin))
 
-	// Remove the empty strings.
-	sort.Strings(ss)
-	for len(ss) > 0 && ss[0] == "" {
-		ss = ss[1:]
-	}
-
-	addAffix := func(mp map[string][]int, affix string, num int) {
-		if mp[affix] == nil {
-			mp[affix] = []int{num}
-		} else {
-			mp[affix] = append(mp[affix], num)
-		}
-	}
-
-	// Find matching (suffix, prefix) pairs of length `affixLen`, remove the
-	// strings that contain them, and insert a hybrid string.
-	// TODO: Make output deterministic by sorting map keys before interating on
-	// them. Maybe. That could be a big performance hit.
-	crush := func(affixLen int) {
-		// For length L, suffixes[L] contains a map of all length-L suffixes to an
-		// index of a string containing that suffix.
-		suffixes := make(map[string][]int, len(ss))
-		prefixes := make(map[string][]int, len(ss))
-		enroll := func(s string, i int) {
-			if affixLen >= len(s) {
-				return
-			}
-			suffix := s[len(s)-affixLen:]
-			prefix := s[0:affixLen]
-			fmt.Fprintf(os.Stderr, "enroll %d %s %s %s\n", affixLen, s, prefix, suffix)
-			addAffix(suffixes, suffix, i)
-			addAffix(prefixes, prefix, i)
-		}
-
-		for i, s := range ss {
-			enroll(s, i)
-		}
-
-		// Join strings where one suffix matches another prefix, going from longest
-		// match to shortest. Burnt is a list of string indexes that are no longer
-		// usable because they have been joined.
-		// TODO: optimize away the 'burnt' table by double-checking that suffixes
-		// and prefixes still match before pulling trigger. That might also mean
-		// that we can unwrap the joinOne function and not have it return after
-		// every operation.
-		burnt := make(map[int]bool)
-		suffs := suffixes
-		prefs := prefixes
-		fmt.Fprintf(os.Stderr, "continue\n")
-		// Returns true if joined anything; false otherwise.
-		joinOne := func() bool {
-			for suffix, sufindexes := range suffs {
-				for _, sufindex := range sufindexes {
-					if burnt[sufindex] || ss[sufindex] == "" {
-						continue
-					}
-					if prefindexes, ok := prefs[suffix]; ok {
-						for _, prefindex := range prefindexes {
-							if burnt[prefindex] || prefindex == sufindex || ss[prefindex] == "" {
-								continue
-							}
-							fmt.Fprintf(os.Stderr, "looking at %d %s  %d %s  %s\n", sufindex, ss[sufindex], prefindex, ss[prefindex], suffix)
-							newString := ss[sufindex] + ss[prefindex][affixLen:]
-							fmt.Fprintf(os.Stderr, "%d-length: %s + %s -> %s\n", affixLen, ss[sufindex], ss[prefindex], newString)
-							ss[sufindex] = newString
-							ss[prefindex] = ""
-							burnt[sufindex] = true
-							burnt[prefindex] = true
-							return true
-						}
-					}
-				}
-			}
-			return false
-		}
-		for joinOne() {
-		}
-	}
 	for j := 15; j > 0; j-- {
-		crush(j)
-		crush(j)
-		crush(j)
-		crush(j)
+		ss = crush(ss, j)
+		ss = crush(ss, j)
+		ss = crush(ss, j)
+		ss = crush(ss, j)
 	}
 
 	text := strings.Join(ss, "")
