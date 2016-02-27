@@ -582,40 +582,56 @@ func makeText() string {
 		ss = ss[1:]
 	}
 
-	// Join strings where one suffix matches another prefix.
-	for {
-		// Find best i, j, k such that ss[i][len-k:] == ss[j][:k],
-		// maximizing overlap length k.
-		besti := -1
-		bestj := -1
-		bestk := 0
-		for i, s := range ss {
-			if s == "" {
+	shortestWortwhile := 1
+	// For length L, suffixes[L] contains a map of all length-L suffixes to an
+	// index of a string containing that suffix.
+	suffixes := make([]map[string]int, 200)
+	for i, s := range ss {
+		for j := len(s) - 1; j > shortestWortwhile; j-- {
+			suffix := s[len(s)-j:]
+			if suffixes[j] == nil {
+				suffixes[j] = make(map[string]int)
+			}
+			fmt.Fprintf(os.Stderr, "suf %d %s %s = %d\n", j, s, suffix, i)
+			suffixes[j][suffix] = i
+		}
+	}
+
+	prefixes := make([]map[string]int, 200)
+	for i, s := range ss {
+		for j := len(s) - 1; j > shortestWortwhile; j-- {
+			prefix := s[0:j]
+			if prefixes[j] == nil {
+				prefixes[j] = make(map[string]int)
+			}
+			fmt.Fprintf(os.Stderr, "pref %d %s %s = %d\n", j, s, prefix, i)
+			prefixes[j][prefix] = i
+		}
+	}
+
+	// Join strings where one suffix matches another prefix, going from longest
+	// match to shortest. Burnt is a list of string indexes that are no longer
+	// usable because they have been joined.
+	burnt := make(map[int]bool)
+	for i := 15; i > shortestWortwhile; i-- {
+		suffs := suffixes[i]
+		prefs := prefixes[i]
+		for suffix, sufindex := range suffs {
+			if burnt[sufindex] {
 				continue
 			}
-			for j, t := range ss {
-				if i == j {
+			if prefindex, ok := prefs[suffix]; ok {
+				if burnt[prefindex] || prefindex == sufindex {
 					continue
 				}
-				for k := bestk + 1; k <= len(s) && k <= len(t); k++ {
-					if s[len(s)-k:] == t[:k] {
-						besti = i
-						bestj = j
-						bestk = k
-					}
-				}
+				newString := ss[sufindex] + ss[prefindex][i:]
+				fmt.Fprintf(os.Stderr, "%d-length: %s = %s -> %s\n", i, ss[sufindex], ss[prefindex], newString)
+				ss[sufindex] = newString
+				ss[prefindex] = ""
+				burnt[sufindex] = true
+				burnt[prefindex] = true
 			}
 		}
-		if bestk > 0 {
-			if *v {
-				fmt.Fprintf(os.Stderr, "%d-length overlap at (%4d,%4d) out of (%4d,%4d): %q and %q\n",
-					bestk, besti, bestj, len(ss), len(ss), ss[besti], ss[bestj])
-			}
-			ss[besti] += ss[bestj][bestk:]
-			ss[bestj] = ""
-			continue
-		}
-		break
 	}
 
 	text := strings.Join(ss, "")
