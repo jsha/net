@@ -590,6 +590,10 @@ func makeText() string {
 		}
 	}
 
+	// Find matching (suffix, prefix) pairs of length `affixLen`, remove the
+	// strings that contain them, and insert a hybrid string.
+	// TODO: Make output deterministic by sorting map keys before interating on
+	// them. Maybe. That could be a big performance hit.
 	crush := func(affixLen int) {
 		// For length L, suffixes[L] contains a map of all length-L suffixes to an
 		// index of a string containing that suffix.
@@ -613,6 +617,10 @@ func makeText() string {
 		// Join strings where one suffix matches another prefix, going from longest
 		// match to shortest. Burnt is a list of string indexes that are no longer
 		// usable because they have been joined.
+		// TODO: optimize away the 'burnt' table by double-checking that suffixes
+		// and prefixes still match before pulling trigger. That might also mean
+		// that we can unwrap the joinOne function and not have it return after
+		// every operation.
 		burnt := make(map[int]bool)
 		suffs := suffixes
 		prefs := prefixes
