@@ -571,37 +571,41 @@ func makePrefixMap(ss []string, prefixLen int) affixMap {
 	return prefixes
 }
 
+func mergeLabel(ss []string, i, affixLen int, prefixes affixMap) {
+	s := ss[i]
+	suffix := s[len(s)-affixLen:]
+	if prefindexes, ok := prefixes[suffix]; ok {
+		for _, prefindex := range prefindexes {
+			if prefindex == i || ss[prefindex] == "" {
+				continue
+			}
+			if *v {
+				fmt.Fprintf(os.Stderr, "%d-length overlap at (%4d,%4d): %q and %q share %q\n",
+					affixLen, i, prefindex, ss[i], ss[prefindex], suffix)
+			}
+			ss[i] += ss[prefindex][affixLen:]
+			ss[prefindex] = ""
+			// ss[i] has a new suffix, so we want to merge again if possible.
+			mergeLabel(ss, i, affixLen, prefixes)
+			return
+		}
+	}
+}
+
 // crush finds matching (suffix, prefix) pairs of length `affixLen`, remove the
 // strings that contain them, and insert a hybrid string.
 // Note: This is not guaranteed to find all such pairs, or the optimal ordering
 // to combine them. Calling crush more than once for a given affixLen is likely
 // to yield additional improvements.
-func crush(ss []string, affixLen int) bool {
-	changed := false
+func crush(ss []string, affixLen int) {
 	prefixes := makePrefixMap(ss, affixLen)
 
 	for i, s := range ss {
 		if len(s) <= affixLen {
 			continue
 		}
-		suffix := s[len(s)-affixLen:]
-		if prefindexes, ok := prefixes[suffix]; ok {
-			for _, prefindex := range prefindexes {
-				if prefindex == i || ss[prefindex] == "" {
-					continue
-				}
-				if *v {
-					fmt.Fprintf(os.Stderr, "%d-length overlap at (%4d,%4d): %q and %q share %q\n",
-						affixLen, i, prefindex, ss[i], ss[prefindex], suffix)
-				}
-				ss[i] += ss[prefindex][affixLen:]
-				ss[prefindex] = ""
-				changed = true
-				break
-			}
-		}
+		mergeLabel(ss, i, affixLen, prefixes)
 	}
-	return changed
 }
 
 type byLength []string
@@ -661,8 +665,7 @@ func combineText(labelsList []string) string {
 	// Length of the maximum overlap in (suffix, prefix) we expect.
 	const maxCommonAffix = 15
 	for j := maxCommonAffix; j > 0; j-- {
-		for crush(ss, j) {
-		}
+		crush(ss, j)
 	}
 
 	text := strings.Join(ss, "")
