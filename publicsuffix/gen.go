@@ -557,33 +557,18 @@ func (am affixMap) addAffix(affix string, num int) {
 	}
 }
 
-// keys returns the keys of affixMap in sorted order.
-func (am affixMap) keys() []string {
-	ks := make([]string, 0, len(am))
-	for k := range am {
-		ks = append(ks, k)
-	}
-	sort.Strings(ks)
-	return ks
-}
-
-// makeAffixMaps constructs a prefix map and a suffix map from a slice of
-// strings, containing all prefixes and suffixes of length affixLen.
-func makeAffixMaps(ss []string, affixLen int) (suffixes, prefixes affixMap) {
-	suffixes = make(map[string][]int, len(ss))
-	prefixes = make(map[string][]int, len(ss))
+// makePrefixMap constructs a prefix map from a slice of
+// strings, containing all prefixes of a given length.
+func makePrefixMap(ss []string, prefixLen int) affixMap {
+	prefixes := make(affixMap, len(ss))
 
 	for i, s := range ss {
-		if affixLen >= len(s) {
-			continue
+		if prefixLen < len(s) {
+			prefixes.addAffix(s[0:prefixLen], i)
 		}
-		suffix := s[len(s)-affixLen:]
-		prefix := s[0:affixLen]
-		suffixes.addAffix(suffix, i)
-		prefixes.addAffix(prefix, i)
 	}
 
-	return suffixes, prefixes
+	return prefixes
 }
 
 // crush finds matching (suffix, prefix) pairs of length `affixLen`, remove the
@@ -591,44 +576,43 @@ func makeAffixMaps(ss []string, affixLen int) (suffixes, prefixes affixMap) {
 // Note: This is not guaranteed to find all such pairs, or the optimal ordering
 // to combine them. Calling crush more than once for a given affixLen is likely
 // to yield additional improvements.
-func crush(ss []string, affixLen int) []string {
-	suffixes, prefixes := makeAffixMaps(ss, affixLen)
+func crush(ss []string, affixLen int) bool {
+	changed := false
+	prefixes := makePrefixMap(ss, affixLen)
 
-	for _, suffix := range suffixes.keys() {
-		sufindexes := suffixes[suffix]
-		for _, sufindex := range sufindexes {
-			if ss[sufindex] == "" {
-				continue
-			}
-			if prefindexes, ok := prefixes[suffix]; ok {
-				for _, prefindex := range prefindexes {
-					if prefindex == sufindex || ss[prefindex] == "" || ss[sufindex] == "" {
-						continue
-					}
-					newString := ss[sufindex] + ss[prefindex][affixLen:]
-					if *v {
-						fmt.Fprintf(os.Stderr, "%d-length overlap at (%4d,%4d): %q and %q share %q\n",
-							affixLen, sufindex, prefindex, ss[sufindex], ss[prefindex], suffix)
-					}
-					ss[sufindex] = ""
-					ss[prefindex] = ""
-					ss = append(ss, newString)
+	for i, s := range ss {
+		if len(s) <= affixLen {
+			continue
+		}
+		suffix := s[len(s)-affixLen:]
+		if prefindexes, ok := prefixes[suffix]; ok {
+			for _, prefindex := range prefindexes {
+				if prefindex == i || ss[prefindex] == "" {
+					continue
 				}
+				if *v {
+					fmt.Fprintf(os.Stderr, "%d-length overlap at (%4d,%4d): %q and %q share %q\n",
+						affixLen, i, prefindex, ss[i], ss[prefindex], suffix)
+				}
+				ss[i] += ss[prefindex][affixLen:]
+				ss[prefindex] = ""
+				changed = true
+				break
 			}
 		}
 	}
-	return ss
+	return changed
 }
 
-type ByLength []string
+type byLength []string
 
-func (s ByLength) Len() int {
+func (s byLength) Len() int {
 	return len(s)
 }
-func (s ByLength) Swap(i, j int) {
+func (s byLength) Swap(i, j int) {
 	s[i], s[j] = s[j], s[i]
 }
-func (s ByLength) Less(i, j int) bool {
+func (s byLength) Less(i, j int) bool {
 	return len(s[i]) < len(s[j])
 }
 
@@ -640,7 +624,7 @@ func removeSubstrings(input []string) []string {
 
 	// Make a copy of input.
 	ss := append(make([]string, 0, len(input)), input...)
-	sort.Sort(ByLength(ss))
+	sort.Sort(byLength(ss))
 
 	for i, shortString := range ss {
 		// For each string, only consider strings higher than it in sort order, i.e.
@@ -652,6 +636,10 @@ func removeSubstrings(input []string) []string {
 				break
 			}
 		}
+	}
+	sort.Strings(ss)
+	for ss[0] == "" {
+		ss = ss[1:]
 	}
 	if *v {
 		fmt.Fprintf(os.Stderr, "removed %d substrings in %s\n", removedCount, time.Now().Sub(begin))
@@ -673,10 +661,8 @@ func combineText(labelsList []string) string {
 	// Length of the maximum overlap in (suffix, prefix) we expect.
 	const maxCommonAffix = 15
 	for j := maxCommonAffix; j > 0; j-- {
-		ss = crush(ss, j)
-		ss = crush(ss, j)
-		ss = crush(ss, j)
-		ss = crush(ss, j)
+		for crush(ss, j) {
+		}
 	}
 
 	text := strings.Join(ss, "")
