@@ -12,14 +12,6 @@ package main
 //	go run gen.go -version "xxx"       >table.go
 //	go run gen.go -version "xxx" -test >table_test.go
 //
-// The first of those two will take around 20 minutes to complete, as the final
-// table is optimized for size. When testing the code generation workflow, pass
-// -crush=false to skip this optimization step, although the results of such a
-// run should not be committed, as the generated table can be around 50% larger
-// and, more importantly, require a larger number of scarce node table bits.
-// You may need to increase nodesBitsTextOffset or other constants to generate
-// a table with -crush=false.
-//
 // Pass -v to print verbose progress information.
 //
 // The version is derived from information found at
@@ -40,7 +32,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	"golang.org/x/net/idna"
 )
@@ -111,8 +102,10 @@ var (
 	// letters are not allowed.
 	validSuffix = regexp.MustCompile(`^[a-z0-9_\!\*\-\.]+$`)
 
-	subset = flag.Bool("subset", false, "generate only a subset of the full table, for debugging")
-	url    = flag.String("url",
+	subset   = flag.Bool("subset", false, "generate only a subset of the full table, for debugging")
+	maxAffix = flag.Int("maxAffix", 15,
+		"Max of length of suffix / prefix to consider when crushing labels.")
+	url = flag.String("url",
 		"https://publicsuffix.org/list/effective_tld_names.dat",
 		"URL of the publicsuffix.org list. If empty, stdin is read instead")
 	v       = flag.Bool("v", false, "verbose output (to stderr)")
@@ -544,113 +537,6 @@ func wildcardStr(wildcard bool) string {
 	return " "
 }
 
-// affixMap maps from an affix (prefix or suffix) to a list of strings
-// containing that affix. The list of strings is represented as indexes into a
-// slice of strings stored elsewhere.
-type affixMap map[string][]int
-
-func (am affixMap) addAffix(affix string, num int) {
-	if am[affix] == nil {
-		am[affix] = []int{num}
-	} else {
-		am[affix] = append(am[affix], num)
-	}
-}
-
-// makePrefixMap constructs a prefix map from a slice of
-// strings, containing all prefixes of a given length.
-func makePrefixMap(ss []string, prefixLen int) affixMap {
-	prefixes := make(affixMap, len(ss))
-
-	for i, s := range ss {
-		if prefixLen < len(s) {
-			prefixes.addAffix(s[0:prefixLen], i)
-		}
-	}
-
-	return prefixes
-}
-
-func mergeLabel(ss []string, i, affixLen int, prefixes affixMap) {
-	s := ss[i]
-	suffix := s[len(s)-affixLen:]
-	if prefindexes, ok := prefixes[suffix]; ok {
-		for _, prefindex := range prefindexes {
-			if prefindex == i || ss[prefindex] == "" {
-				continue
-			}
-			if *v {
-				fmt.Fprintf(os.Stderr, "%d-length overlap at (%4d,%4d): %q and %q share %q\n",
-					affixLen, i, prefindex, ss[i], ss[prefindex], suffix)
-			}
-			ss[i] += ss[prefindex][affixLen:]
-			ss[prefindex] = ""
-			// ss[i] has a new suffix, so we want to merge again if possible.
-			mergeLabel(ss, i, affixLen, prefixes)
-			return
-		}
-	}
-}
-
-// crush finds matching (suffix, prefix) pairs of length `affixLen`, remove the
-// strings that contain them, and insert a hybrid string.
-// Note: This is not guaranteed to find all such pairs, or the optimal ordering
-// to combine them. Calling crush more than once for a given affixLen is likely
-// to yield additional improvements.
-func crush(ss []string, affixLen int) {
-	prefixes := makePrefixMap(ss, affixLen)
-
-	for i, s := range ss {
-		if len(s) <= affixLen {
-			continue
-		}
-		mergeLabel(ss, i, affixLen, prefixes)
-	}
-}
-
-type byLength []string
-
-func (s byLength) Len() int {
-	return len(s)
-}
-func (s byLength) Swap(i, j int) {
-	s[i], s[j] = s[j], s[i]
-}
-func (s byLength) Less(i, j int) bool {
-	return len(s[i]) < len(s[j])
-}
-
-// removeSubstrings returns a subset of its input with any strings removed
-// that are substrings of other strings in the output.
-func removeSubstrings(input []string) []string {
-	begin := time.Now()
-	removedCount := 0
-
-	// Make a copy of input.
-	ss := append(make([]string, 0, len(input)), input...)
-	sort.Sort(byLength(ss))
-
-	for i, shortString := range ss {
-		// For each string, only consider strings higher than it in sort order, i.e.
-		// of equal length or greater.
-		for _, longString := range ss[i+1:] {
-			if strings.Contains(longString, shortString) {
-				removedCount++
-				ss[i] = ""
-				break
-			}
-		}
-	}
-	sort.Strings(ss)
-	for ss[0] == "" {
-		ss = ss[1:]
-	}
-	if *v {
-		fmt.Fprintf(os.Stderr, "removed %d substrings in %s\n", removedCount, time.Now().Sub(begin))
-	}
-	return ss
-}
-
 // combineText combines all the strings in labelsList to form one giant string.
 // Overlapping strings will be merged: "arpa" and "parliament" could yield
 // "arparliament".
@@ -662,15 +548,101 @@ func combineText(labelsList []string) string {
 
 	ss := removeSubstrings(labelsList)
 
-	// Length of the maximum overlap in (suffix, prefix) we expect.
-	const maxCommonAffix = 15
-	for j := maxCommonAffix; j > 0; j-- {
-		crush(ss, j)
-	}
-
-	text := strings.Join(ss, "")
+	text := crush(ss)
 	if *v {
 		fmt.Fprintf(os.Stderr, "crushed %d bytes to become %d bytes\n", beforeLength, len(text))
 	}
 	return text
+}
+
+type byLength []string
+
+func (s byLength) Len() int           { return len(s) }
+func (s byLength) Swap(i, j int)      { s[i], s[j] = s[j], s[i] }
+func (s byLength) Less(i, j int) bool { return len(s[i]) < len(s[j]) }
+
+// removeSubstrings returns a copy of its input with any strings removed
+// that are substrings of other provided strings.
+func removeSubstrings(input []string) []string {
+	// Make a copy of input.
+	ss := append(make([]string, 0, len(input)), input...)
+	sort.Sort(byLength(ss))
+
+	for i, shortString := range ss {
+		// For each string, only consider strings higher than it in sort order, i.e.
+		// of equal length or greater.
+		for _, longString := range ss[i+1:] {
+			if strings.Contains(longString, shortString) {
+				ss[i] = ""
+				break
+			}
+		}
+	}
+	sort.Strings(ss)
+	for len(ss) > 0 && ss[0] == "" {
+		ss = ss[1:]
+	}
+	return ss
+}
+
+// crush combines a list of strings, taking advantage of overlaps. It returns a
+// single string that contains each input string somewhere inside it.
+func crush(ss []string) string {
+	for affixLen := *maxAffix; affixLen > 0; affixLen-- {
+		prefixes := makePrefixMap(ss, affixLen)
+
+		for i, s := range ss {
+			if len(s) <= affixLen {
+				continue
+			}
+			mergeLabel(ss, i, affixLen, prefixes)
+		}
+	}
+
+	return strings.Join(ss, "")
+}
+
+func mergeLabel(ss []string, i, affixLen int, prefixes prefixMap) {
+	s := ss[i]
+	suffix := s[len(s)-affixLen:]
+	if prefindexes, ok := prefixes[suffix]; ok {
+		for _, j := range prefindexes {
+			// Empty strings mean "already used." Also avoid merging with self.
+			if ss[j] == "" || i == j {
+				continue
+			}
+			if *v {
+				fmt.Fprintf(os.Stderr, "%d-length overlap at (%4d,%4d): %q and %q share %q\n",
+					affixLen, i, j, ss[i], ss[j], suffix)
+			}
+			ss[i] += ss[j][affixLen:]
+			ss[j] = ""
+			// ss[i] has a new suffix, so merge again if possible.
+			mergeLabel(ss, i, affixLen, prefixes)
+			return
+		}
+	}
+}
+
+// prefixMap maps from a prefix to a list of strings containing that prefix. The
+// list of strings is represented as indexes into a slice of strings stored
+// elsewhere.
+type prefixMap map[string][]int
+
+// makePrefixMap constructs a prefixMap from a slice of strings
+func makePrefixMap(ss []string, prefixLen int) prefixMap {
+	prefixes := make(prefixMap, len(ss))
+
+	for i, s := range ss {
+		if prefixLen < len(s) {
+			affix := s[:prefixLen]
+			if prefixes[affix] == nil {
+				prefixes[affix] = []int{i}
+			} else {
+				prefixes[affix] = append(prefixes[affix], i)
+			}
+		}
+	}
+
+	return prefixes
 }
