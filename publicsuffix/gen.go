@@ -102,10 +102,10 @@ var (
 	// letters are not allowed.
 	validSuffix = regexp.MustCompile(`^[a-z0-9_\!\*\-\.]+$`)
 
-	subset   = flag.Bool("subset", false, "generate only a subset of the full table, for debugging")
 	maxAffix = flag.Int("maxAffix", 15,
 		"Max of length of suffix / prefix to consider when crushing labels.")
-	url = flag.String("url",
+	subset = flag.Bool("subset", false, "generate only a subset of the full table, for debugging")
+	url    = flag.String("url",
 		"https://publicsuffix.org/list/effective_tld_names.dat",
 		"URL of the publicsuffix.org list. If empty, stdin is read instead")
 	v       = flag.Bool("v", false, "verbose output (to stderr)")
@@ -578,6 +578,8 @@ func removeSubstrings(input []string) []string {
 			}
 		}
 	}
+
+	// Remove the empty strings.
 	sort.Strings(ss)
 	for len(ss) > 0 && ss[0] == "" {
 		ss = ss[1:]
@@ -586,7 +588,7 @@ func removeSubstrings(input []string) []string {
 }
 
 // crush combines a list of strings, taking advantage of overlaps. It returns a
-// single string that contains each input string somewhere inside it.
+// single string that contains each input string as a substring.
 func crush(ss []string) string {
 	for affixLen := *maxAffix; affixLen > 0; affixLen-- {
 		prefixes := makePrefixMap(ss, affixLen)
